@@ -1,5 +1,3 @@
-import numpy
-import torch
 
 from data_provider.data_loader import *
 from torch.utils.data import DataLoader, DistributedSampler
