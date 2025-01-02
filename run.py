@@ -31,7 +31,6 @@ def str_to_bool(value):
 parser = argparse.ArgumentParser()
 
 # basic config
-parser.add_argument('--is_training', type=int, default=1, help='status')
 parser.add_argument('--train_only', action='store_true', default=False,
                     help='perform training on full input dataset without validation and testing')
 parser.add_argument('--wo_test', action='store_true', default=False, help='only valid, not test')
@@ -292,9 +291,45 @@ else:
     path = 'D:/data/'
     if args.checkpoints:
         args.checkpoints = 'D:/checkpoints/'
+
+if args.online_method:
+    flag = args.online_method.lower()
+    if not args.border_type:
+        if args.online_method == 'Online':
+            flag = args.data
+            args.checkpoints = ""
+        else:
+            flag = args.data + '_' + flag
+
+    if flag == 'fsnet':
+        flag = 'online'
+
+    if args.online_method == 'OneNet' and args.pretrain:
+        fsnet_name = "FSNet_RevIN"
+        args.fsnet_path = f'./checkpoints/{args.dataset}_60_{args.pred_len}_{fsnet_name}_' \
+                          f'online_ftM_sl60_ll48_pl{args.pred_len}_lr{settings.pretrain_lr_online_dict[fsnet_name][args.dataset]}' \
+                          f'_uniFalse_dm512_nh8_el2_dl1_df2048_fc3_ebtimeF_dtTrue_test_{ii}/checkpoint.pth'
+
+    if 'proceed' in flag:
+        if not args.freeze:
+            flag += "_fulltune"
+        if not args.pretrain:
+            flag += "_new"
+        flag += f"_{args.lradj}"
+        flag += f'_{args.tune_mode}_btl{args.bottleneck_dim}_ema{args.ema}'
+        if args.concept_dim:
+            flag += f'_mid{args.concept_dim}'
+        if not args.individual_generator:
+            flag += '_share'
+        if args.share_encoder:
+            flag += '_share_enc'
+        if args.wo_clip:
+            flag += '_noclip'
+else:
+    flag = args.border_type if args.border_type else args.data
+
 print('Args in experiment:')
 print(args)
-
 
 def setup_seed(seed):
     torch.manual_seed(seed)
@@ -304,193 +339,44 @@ def setup_seed(seed):
     # torch.backends.cudnn.benchmark=False
     # torch.backends.cudnn.deterministic = True
 
-
 if __name__ == '__main__':
     # args = get_args()
     train_data, train_loader, vali_data, vali_loader = None, None, None, None
     test_data, test_loader = None, None
 
-    if args.is_training:
-        all_results = {'mse': [], 'mae': []}
-        for ii in range(args.itr):
-            if ii == 0 and args.skip and os.path.exists(args.skip):
-                if args.wo_test:
-                    continue
-                with open(args.skip, 'rt', encoding='utf-8', errors='ignore') as f:
-                    for line in f.readlines():
-                        if line.startswith('mse:'):
-                            splits = line.split(',')
-                            mse, mae = splits[0].split(':')[1], splits[1].split(':')[1]
-                            all_results['mse'].append(float(mse))
-                            all_results['mae'].append(float(mae))
-                            break
-                if len(all_results['mse']) > 0:
-                    continue
-            if args.border_type:
-                if args.model in ['PatchTST', 'iTransformer']:
-                    fix_seed = 2021 + ii
-                else:
-                    fix_seed = 2023 + ii
-            else:
-                fix_seed = 2023 + ii if args.model == 'iTransformer' else 2021 + ii
-            setup_seed(fix_seed)
-            print('Seed:', fix_seed)
-
-            if args.online_method:
-                flag = args.online_method.lower()
-                if not args.border_type:
-                    if args.online_method == 'Online':
-                        flag = args.data
-                        args.checkpoints = ""
-                    else:
-                        flag = args.data + '_' + flag
-
-                if flag == 'fsnet':
-                    flag = 'online'
-
-                if args.online_method == 'OneNet' and args.pretrain:
-                    fsnet_name = "FSNet_RevIN"
-                    args.fsnet_path = f'./checkpoints/{args.dataset}_60_{args.pred_len}_{fsnet_name}_' \
-                                      f'online_ftM_sl60_ll48_pl{args.pred_len}_lr{settings.pretrain_lr_online_dict[fsnet_name][args.dataset]}' \
-                                      f'_uniFalse_dm512_nh8_el2_dl1_df2048_fc3_ebtimeF_dtTrue_test_{ii}/checkpoint.pth'
-
-                if 'proceed' in flag:
-                    if not args.freeze:
-                        flag += "_fulltune"
-                    if not args.pretrain:
-                        flag += "_new"
-                    flag += f"_{args.lradj}"
-                    flag += f'_{args.tune_mode}_btl{args.bottleneck_dim}_ema{args.ema}'
-                    if args.concept_dim:
-                        flag += f'_mid{args.concept_dim}'
-                    if not args.individual_generator:
-                        flag += '_share'
-                    if args.share_encoder:
-                        flag += '_share_enc'
-                    if args.wo_clip:
-                        flag += '_noclip'
-            else:
-                flag = args.border_type if args.border_type else args.data
-
-            setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
-                args.model_id,
-                flag,
-                args.features,
-                args.seq_len,
-                args.label_len,
-                args.pred_len,
-                args.learning_rate,
-                args.d_model,
-                args.n_heads,
-                args.e_layers,
-                args.d_layers,
-                args.d_ff,
-                args.factor,
-                args.embed,
-                args.distil,
-                args.des, ii)
-
-            if args.pretrain:
-                pretrain_lr = settings.pretrain_lr_online_dict[args.model + ("_RevIN" if args.normalization else "")][args.dataset] \
-                    if args.online_method else settings.pretrain_lr_dict[args.model][args.dataset]
-                if not args.border_type and args.model == 'iTransformer' and args.dataset == 'Weather':
-                    pretrain_lr = 0.0001
-                pretrain_setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
-                    args.model_id,
-                    args.border_type if args.border_type else args.data,
-                    args.features,
-                    args.seq_len,
-                    args.label_len,
-                    args.pred_len,
-                    pretrain_lr,
-                    args.d_model,
-                    args.n_heads,
-                    args.e_layers,
-                    args.d_layers,
-                    args.d_ff,
-                    args.factor,
-                    args.embed,
-                    args.distil,
-                    args.des, ii)
-                args.pred_path = os.path.join('./results/', pretrain_setting, 'real_prediction.npy')
-                if platform.system() == 'Windows':
-                    args.load_path = os.path.join('D://checkpoints/', pretrain_setting, 'checkpoint.pth')
-                else:
-                    args.load_path = os.path.join('./checkpoints/', pretrain_setting, 'checkpoint.pth')
-            exp = Exp(args)  # set experiments
-
-            if train_data is None:
-                train_data, train_loader = exp._get_data('train')
-            if not hasattr(args, 'borders'):
-                args.borders = train_data.borders
-                if args.border_type != 'online' and args.model == 'PatchTST':
-                    settings.drop_last_PatchTST(args) # SOLID dropout the last when data split = 7:2:1
-            exp.wrap_data_kwargs['borders'] = args.borders
-
-            path = os.path.join(args.checkpoints, setting, 'checkpoint.pth')
-            if args.online_method not in ['Online', 'SOLID', 'ER', 'DERpp']:
-                print('Checkpoints in', path)
-                if (args.only_test or args.do_valid) and os.path.exists(path):
-                    print('Loading', path)
-                    exp.load_checkpoint(path)
-                    print('Learning rate of model_optim is', exp.model_optim.param_groups[0]['lr'])
-                else:
-                    print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
-                    _, train_data, train_loader, vali_data, vali_loader = exp.train(setting, train_data, train_loader,
-                                                                                    vali_data, vali_loader)
-                    torch.cuda.empty_cache()
-
-            if args.online_learning_rate is not None and not isinstance(exp, Exp_SOLID):
-                for j in range(len(exp.model_optim.param_groups)):
-                    exp.model_optim.param_groups[j]['lr'] = args.online_learning_rate
-                print('Adjust learning rate of model_optim to', exp.model_optim.param_groups[0]['lr'])
-
-            if args.do_valid and args.online_method and args.local_rank <= 0:
-                assert isinstance(exp, Exp_Online)
-                mse, mae = exp.online(online_data=vali_data if isinstance(vali_data, Dataset_Recent) else None,
-                                      phase='val', show_progress=True)[:2]
-                print('Best Valid MSE:', mse)
-                all_results['mse'].append(mse)
-                all_results['mae'].append(mae)
+    all_results = {'mse': [], 'mae': []}
+    for ii in range(args.itr):
+        if ii == 0 and args.skip and os.path.exists(args.skip):
+            if args.wo_test:
                 continue
+            with open(args.skip, 'rt', encoding='utf-8', errors='ignore') as f:
+                for line in f.readlines():
+                    if line.startswith('mse:'):
+                        splits = line.split(',')
+                        mse, mae = splits[0].split(':')[1], splits[1].split(':')[1]
+                        all_results['mse'].append(float(mse))
+                        all_results['mae'].append(float(mae))
+                        break
+            if len(all_results['mse']) > 0:
+                continue
+        if args.border_type:
+            if args.model in ['PatchTST', 'iTransformer']:
+                fix_seed = 2021 + ii
+            else:
+                fix_seed = 2023 + ii
+        else:
+            fix_seed = 2023 + ii if args.model == 'iTransformer' else 2021 + ii
+        setup_seed(fix_seed)
+        print('Seed:', fix_seed)
 
-            if args.do_predict:
-                print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-                setup_seed(fix_seed)
-                mse, mae = exp.predict(path, setting, True)[:2]
-                all_results['mse'].append(mse)
-                all_results['mae'].append(mae)
-            elif not args.wo_test and not args.train_only and args.local_rank <= 0:
-                print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-                if isinstance(exp, Exp_Online):
-                    setup_seed(fix_seed)
-                    if not isinstance(exp, Exp_SOLID) and not args.wo_valid:
-                        vali_data = None
-                        torch.cuda.empty_cache()
-                        gc.collect()
-                        exp.update_valid()
-                    mse, mae, test_data = exp.online(test_data)
-                else:
-                    mse, mae, test_data, test_loader = exp.test(setting, test_data, test_loader)
-                all_results['mse'].append(mse)
-                all_results['mae'].append(mae)
-            torch.cuda.empty_cache()
-
-        for k in all_results.keys():
-            all_results[k] = np.array(all_results[k])
-            all_results[k] = [all_results[k].mean(), all_results[k].std()]
-        pprint(all_results)
-    else:
-        ii = 0
-        setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_uni{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+        setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
             args.model_id,
-            args.border_type if args.border_type else args.data,
+            flag,
             args.features,
             args.seq_len,
             args.label_len,
             args.pred_len,
             args.learning_rate,
-            args.univariate,
             args.d_model,
             args.n_heads,
             args.e_layers,
@@ -500,17 +386,94 @@ if __name__ == '__main__':
             args.embed,
             args.distil,
             args.des, ii)
-        args.load_path = os.path.join(args.checkpoints, setting, 'checkpoint.pth')
-        # args.pretrain = True
-        if args.lift:
-            setting += '_lift'
 
+        if args.pretrain:
+            pretrain_lr = settings.pretrain_lr_online_dict[args.model + ("_RevIN" if args.normalization else "")][args.dataset] \
+                if args.online_method else settings.pretrain_lr_dict[args.model][args.dataset]
+            if not args.border_type and args.model == 'iTransformer' and args.dataset == 'Weather':
+                pretrain_lr = 0.0001
+            pretrain_setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+                args.model_id,
+                args.border_type if args.border_type else args.data,
+                args.features,
+                args.seq_len,
+                args.label_len,
+                args.pred_len,
+                pretrain_lr,
+                args.d_model,
+                args.n_heads,
+                args.e_layers,
+                args.d_layers,
+                args.d_ff,
+                args.factor,
+                args.embed,
+                args.distil,
+                args.des, ii)
+            args.pred_path = os.path.join('./results/', pretrain_setting, 'real_prediction.npy')
+            if platform.system() == 'Windows':
+                args.load_path = os.path.join('D://checkpoints/', pretrain_setting, 'checkpoint.pth')
+            else:
+                args.load_path = os.path.join('./checkpoints/', pretrain_setting, 'checkpoint.pth')
         exp = Exp(args)  # set experiments
+
+        if train_data is None:
+            train_data, train_loader = exp._get_data('train')
+        if not hasattr(args, 'borders'):
+            args.borders = train_data.borders
+            if args.border_type != 'online' and args.model == 'PatchTST':
+                settings.drop_last_PatchTST(args) # SOLID dropout the last when data split = 7:2:1
+        exp.wrap_data_kwargs['borders'] = args.borders
+
+        path = os.path.join(args.checkpoints, setting, 'checkpoint.pth')
+        if args.online_method not in ['Online', 'SOLID', 'ER', 'DERpp']:
+            print('Checkpoints in', path)
+            if (args.only_test or args.do_valid) and os.path.exists(path):
+                print('Loading', path)
+                exp.load_checkpoint(path)
+                print('Learning rate of model_optim is', exp.model_optim.param_groups[0]['lr'])
+            else:
+                print('>>>>>>>start training : {}>>>>>>>>>>>>>>>>>>>>>>>>>>'.format(setting))
+                _, train_data, train_loader, vali_data, vali_loader = exp.train(setting, train_data, train_loader,
+                                                                                vali_data, vali_loader)
+                torch.cuda.empty_cache()
+
+        if args.online_learning_rate is not None and not isinstance(exp, Exp_SOLID):
+            for j in range(len(exp.model_optim.param_groups)):
+                exp.model_optim.param_groups[j]['lr'] = args.online_learning_rate
+            print('Adjust learning rate of model_optim to', exp.model_optim.param_groups[0]['lr'])
+
+        if args.do_valid and args.online_method and args.local_rank <= 0:
+            assert isinstance(exp, Exp_Online)
+            mse, mae = exp.online(online_data=vali_data if isinstance(vali_data, Dataset_Recent) else None,
+                                  phase='val', show_progress=True)[:2]
+            print('Best Valid MSE:', mse)
+            all_results['mse'].append(mse)
+            all_results['mae'].append(mae)
+            continue
 
         if args.do_predict:
             print('>>>>>>>predicting : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-            exp.predict(args.load_path, setting, True)
-        else:
+            setup_seed(fix_seed)
+            mse, mae = exp.predict(path, setting, True)[:2]
+            all_results['mse'].append(mse)
+            all_results['mae'].append(mae)
+        elif not args.wo_test and not args.train_only and args.local_rank <= 0:
             print('>>>>>>>testing : {}<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<<'.format(setting))
-            exp.test(setting, test=1)
+            if isinstance(exp, Exp_Online):
+                setup_seed(fix_seed)
+                if not isinstance(exp, Exp_SOLID) and not args.wo_valid:
+                    vali_data = None
+                    torch.cuda.empty_cache()
+                    gc.collect()
+                    exp.update_valid()
+                mse, mae, test_data = exp.online(test_data)
+            else:
+                mse, mae, test_data, test_loader = exp.test(setting, test_data, test_loader)
+            all_results['mse'].append(mse)
+            all_results['mae'].append(mae)
         torch.cuda.empty_cache()
+
+    for k in all_results.keys():
+        all_results[k] = np.array(all_results[k])
+        all_results[k] = [all_results[k].mean(), all_results[k].std()]
+    pprint(all_results)
