@@ -262,6 +262,9 @@ if args.online_method:
             args.freeze = True
 
 args.timeenc = 2
+if args.override_hyper and args.model in settings.hyperparams:
+    for k, v in settings.get_hyperparams(args.dataset, args.model, args, args.reduce_bs).items():
+        args.__setattr__(k, v)
 
 if args.local_rank != -1:
     torch.cuda.set_device(args.local_rank)
