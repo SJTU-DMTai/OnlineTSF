@@ -4,6 +4,7 @@ import torch
 import matplotlib.pyplot as plt
 import time
 from copy import deepcopy
+from torch import nn
 
 plt.switch_backend('agg')
 
@@ -49,48 +50,52 @@ def instance_norm(ts, dim):
 
 
 def adjust_learning_rate(optimizer, scheduler, epoch, args, printout=True):
-    # lr = args.learning_rate * (0.2 ** (epoch // 2))
-    if args.lradj == 'type1':
-        lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch - 1) // 1))}
-    elif args.lradj == 'type2':
-        lr_adjust = {
-            2: 5e-5, 4: 1e-5, 6: 5e-6, 8: 1e-6,
-            10: 5e-7, 15: 1e-7, 20: 5e-8
-        }
-    elif args.lradj == 'type3':
-        lr_adjust = {epoch: args.learning_rate if epoch < 3 else args.learning_rate * (0.9 ** ((epoch - 3) // 1))}
-    elif args.lradj == 'type4':
-        lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch) // 1))}
-    elif args.lradj == 'type5':
-        lr_adjust = {epoch: args.learning_rate if epoch < 3 else args.learning_rate * (0.95 ** ((epoch - 3) // 1))}
-    elif args.lradj == 'every5':
-        lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch - 1) // 5))}
-    elif args.lradj == 'warmup':
-        lr_adjust = {epoch: args.learning_rate * (0.5 ** ((min(epoch, args.warmup_epochs) - 1) // 1))}
-    elif args.lradj == 'constant':
-        lr_adjust = {epoch: args.learning_rate}
-    elif args.lradj == '3':
-        lr_adjust = {epoch: args.learning_rate if epoch < 10 else args.learning_rate*0.1}
-    elif args.lradj == '4':
-        lr_adjust = {epoch: args.learning_rate if epoch < 15 else args.learning_rate*0.1}
-    elif args.lradj == '5':
-        lr_adjust = {epoch: args.learning_rate if epoch < 25 else args.learning_rate*0.1}
-    elif args.lradj == '6':
-        lr_adjust = {epoch: args.learning_rate if epoch < 5 else args.learning_rate*0.1}  
-    elif args.lradj == 'TST':
-        lr_adjust = {epoch: scheduler.get_last_lr()[0]}
-    elif args.lradj == 'Crossformer':
-        lr_adjust = {2: args.learning_rate * 0.5 ** 1, 4: args.learning_rate * 0.5 ** 2,
-                     6: args.learning_rate * 0.5 ** 3, 8: args.learning_rate * 0.5 ** 4,
-                     10: args.learning_rate * 0.5 ** 5}
+    if isinstance(optimizer, (tuple, list)):
+        for _optimizer in optimizer:
+            adjust_learning_rate(_optimizer, scheduler, epoch, args, printout)
     else:
-        lr_adjust = {}
-    
-    if epoch in lr_adjust.keys():
-        lr = lr_adjust[epoch]
-        for param_group in optimizer.param_groups:
-            param_group['lr'] = lr
-        if printout: print('Updating learning rate to {}'.format(lr))
+        # lr = args.learning_rate * (0.2 ** (epoch // 2))
+        if args.lradj == 'type1':
+            lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch - 1) // 1))}
+        elif args.lradj == 'type2':
+            lr_adjust = {
+                2: 5e-5, 4: 1e-5, 6: 5e-6, 8: 1e-6,
+                10: 5e-7, 15: 1e-7, 20: 5e-8
+            }
+        elif args.lradj == 'type3':
+            lr_adjust = {epoch: args.learning_rate if epoch < 3 else args.learning_rate * (0.9 ** ((epoch - 3) // 1))}
+        elif args.lradj == 'type4':
+            lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch) // 1))}
+        elif args.lradj == 'type5':
+            lr_adjust = {epoch: args.learning_rate if epoch < 3 else args.learning_rate * (0.95 ** ((epoch - 3) // 1))}
+        elif args.lradj == 'every5':
+            lr_adjust = {epoch: args.learning_rate * (0.5 ** ((epoch - 1) // 5))}
+        elif args.lradj == 'warmup':
+            lr_adjust = {epoch: args.learning_rate * (0.5 ** ((min(epoch, args.warmup_epochs) - 1) // 1))}
+        elif args.lradj == 'constant':
+            lr_adjust = {epoch: args.learning_rate}
+        elif args.lradj == '3':
+            lr_adjust = {epoch: args.learning_rate if epoch < 10 else args.learning_rate*0.1}
+        elif args.lradj == '4':
+            lr_adjust = {epoch: args.learning_rate if epoch < 15 else args.learning_rate*0.1}
+        elif args.lradj == '5':
+            lr_adjust = {epoch: args.learning_rate if epoch < 25 else args.learning_rate*0.1}
+        elif args.lradj == '6':
+            lr_adjust = {epoch: args.learning_rate if epoch < 5 else args.learning_rate*0.1}
+        elif args.lradj == 'TST':
+            lr_adjust = {epoch: scheduler.get_last_lr()[0]}
+        elif args.lradj == 'Crossformer':
+            lr_adjust = {2: args.learning_rate * 0.5 ** 1, 4: args.learning_rate * 0.5 ** 2,
+                         6: args.learning_rate * 0.5 ** 3, 8: args.learning_rate * 0.5 ** 4,
+                         10: args.learning_rate * 0.5 ** 5}
+        else:
+            lr_adjust = {}
+
+        if epoch in lr_adjust.keys():
+            lr = lr_adjust[epoch]
+            for param_group in optimizer.param_groups:
+                param_group['lr'] = lr
+            if printout: print('Updating learning rate to {}'.format(lr))
 
 
 
@@ -186,6 +191,28 @@ def test_params_flop(model, x_shape, x=None):
     # import torchinfo
     # torchinfo.summary(model, x_shape, depth=1)
 
+
+def override_state(groups, new_opt):
+    saved_groups = new_opt.param_groups
+    id_map = {old_id: p for old_id, p in zip(range(len(saved_groups[0]["params"])), groups[0]["params"])}
+    state = collections.defaultdict(dict)
+    device = groups[0]["params"][0].device
+    dtype = groups[0]["params"][0].dtype
+    for k, v in new_opt.state[0].items():
+        if k in id_map:
+            param = id_map[k]
+            for _k, _v in v.items():
+                state[param][_k] = _v.detach() if isinstance(_v, torch.Tensor) else torch.tensor(_v, device=device, dtype=dtype)
+        else:
+            state[k] = v
+    return state
+
+
+def has_rnn(module: nn.Module):
+    for module in module.modules():
+        if isinstance(module, nn.RNNBase):
+            return True
+    return False
 
 
 

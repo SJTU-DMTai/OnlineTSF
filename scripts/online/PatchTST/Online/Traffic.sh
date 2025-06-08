@@ -23,6 +23,6 @@ do
     --itr 3 --online_method $online_method \
     --pin_gpu True --reduce_bs False \
     --save_opt --only_test \
-    --online_learning_rate $online_learning_rate > logs/online/$model_name'_'$online_method'_'$data'_'$pred_len'_onlinelr'$online_learning_rate.log2 2>&1
+    --online_learning_rate $online_learning_rate > logs/online/$model_name'_'$online_method'_'$data'_'$pred_len'_onlinelr'$online_learning_rate.log 2>&1
 done
 done

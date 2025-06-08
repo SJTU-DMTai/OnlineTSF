@@ -15,7 +15,7 @@ for pred_len in 24 48 96
 do
 for online_learning_rate in 0.0000001
 do
-  filename=logs/online/$model_name'_'$online_method'_'$data'_'$pred_len'_lr0.0001_onlinelr'$online_learning_rate.log2
+  filename=logs/online/$model_name'_'$online_method'_'$data'_'$pred_len'_lr0.0001_onlinelr'$online_learning_rate.log
   python -u run.py \
     --dataset $data --border_type 'online' \
     --model $model_name \

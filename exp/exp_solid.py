@@ -1,4 +1,5 @@
 import time
+from functools import partial
 
 from torch.utils.data import DataLoader
 from tqdm import tqdm
@@ -125,8 +126,8 @@ class Exp_SOLID(Exp_Online):
         self.model.eval()
         if online_data is None:
             online_data = get_dataset(self.args, 'test', self.device,
-                                      take_pre=self.test_train_num + self.pred_len - 1,
-                                      wrap_class=self.args.wrap_data_class, **self.wrap_data_kwargs)
+                                    take_pre=self.test_train_num + self.pred_len - 1,
+                                    wrap_class=self.args.wrap_data_class)
         assert self.args.borders[1][0] - self.test_train_num - self.pred_len + 1 >= 0
         if self.rep_path:
             all_reps = np.load(self.rep_path)
@@ -215,8 +216,8 @@ class Exp_SOLID(Exp_Online):
     def analysis_online(self):
         self.model.eval()
         online_data = get_dataset(self.args, 'test', self.device,
-                                  take_pre=self.test_train_num + self.pred_len - 1,
-                                  wrap_class=self.args.wrap_data_class, **self.wrap_data_kwargs)
+                                take_pre=self.test_train_num + self.pred_len - 1,
+                                wrap_class=self.args.wrap_data_class)
         assert self.args.borders[1][0] - self.test_train_num - self.pred_len + 1 >= 0
         data_x = online_data.data_x.to(self.device)
         data_y = online_data.data_y.to(self.device)

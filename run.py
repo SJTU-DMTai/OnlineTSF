@@ -3,7 +3,7 @@ import datetime
 import gc
 
 import settings
-from data_provider import data_loader
+from data_provider import dataloader_online
 
 cur_sec = datetime.datetime.now().strftime('%Y-%m-%d %H:%M:%S')
 print(cur_sec)
@@ -35,7 +35,7 @@ parser.add_argument('--train_only', action='store_true', default=False,
                     help='perform training on full input dataset without validation and testing')
 parser.add_argument('--wo_test', action='store_true', default=False, help='only valid, not test')
 parser.add_argument('--wo_valid', action='store_true', default=False, help='only test')
-# parser.add_argument('--model_id', type=str, required=True, default='test', help='model id')
+parser.add_argument('--model_id', type=str, default='', help='model id')
 parser.add_argument('--only_test', action='store_true', default=False)
 parser.add_argument('--do_valid', action='store_true', default=False)
 parser.add_argument('--model', type=str, required=True, default='PatchTST')
@@ -58,6 +58,10 @@ parser.add_argument('--leakage', action='store_true', default=False)
 parser.add_argument('--debug', action='store_true', default=False)
 parser.add_argument('--pretrain', action='store_true', default=False)
 parser.add_argument('--freeze', action='store_true', default=False)
+parser.add_argument('--replay_num', type=int, default=0, help='')
+
+# Meta
+parser.add_argument('--task_num', type=int, default=1)
 
 # Proceed
 parser.add_argument('--act', type=str, default='sigmoid', help='activation')
@@ -154,6 +158,8 @@ parser.add_argument('--itr', type=int, default=5, help='experiments times')
 parser.add_argument('--train_epochs', type=int, default=100, help='train epochs')
 parser.add_argument('--begin_valid_epoch', type=int, default=0)
 parser.add_argument('--batch_size', type=int, default=32, help='batch size of train input data')
+parser.add_argument('--macro_batch_size', type=int, default=0, help='')
+parser.add_argument('--grad_accumulation', type=int, default=1)
 parser.add_argument('--patience', type=int, default=5, help='early stopping patience')
 parser.add_argument('--optim', type=str, default='Adam')
 parser.add_argument('--learning_rate', type=float, default=0.0001, help='optimizer learning rate')
@@ -201,6 +207,7 @@ if args.use_gpu and args.use_multi_gpu:
     args.gpu = args.device_ids[0]
 
 args.enc_in, args.c_out = data_settings[args.dataset][args.features]
+args.period = data_settings[args.dataset].get('period', 1)
 args.data_path = data_settings[args.dataset]['data']
 args.dec_in = args.enc_in
 if args.model.endswith('_leak'):
@@ -227,6 +234,7 @@ if hasattr(args, 'border_type'):
 
 Exp = Exp_Main
 
+extra_model_id = args.model_id
 args.model_id = f'{args.dataset}_{args.seq_len}_{args.pred_len}_{args.model}'
 if args.normalization is not None:
     args.model_id += '_' + args.normalization
@@ -234,8 +242,13 @@ if args.normalization is not None:
 if args.border_type == 'online':
     args.patience = min(args.patience, 3)
 
+if args.model in settings.need_x_mark:
+    # args.optim = 'AdamW' if args.optim != 'AdamW' and args.online_method.lower() == 'Concept_Tune' else args.optim
+    args.optim = 'AdamW'
+    args.patience = 3
+
 if args.online_method:
-    args.train_epochs = min(args.train_epochs, 25)
+    args.train_epochs = min(args.train_epochs, 10)
     args.save_opt = True
     if 'FSNet' in args.model and args.online_method == 'Online':
         args.online_method = 'FSNet'
@@ -245,6 +258,9 @@ if args.online_method:
     if args.online_method == 'Online':
         args.pretrain = True
         args.only_test = True
+    elif args.online_method == 'Online_Meta':
+        args.pretrain = True
+        args.optim = 'Adam'
 
     if 'FSNet' in args.model:
         args.pretrain = False
@@ -280,10 +296,6 @@ if args.model in ['MTGNN']:
         if args.features == 'M':
             args.c_out = int(args.c_out / args.in_dim)
 
-if args.model in settings.need_x_mark:
-    # args.optim = 'AdamW' if args.optim != 'AdamW' and args.online_method.lower() == 'Concept_Tune' else args.optim
-    args.optim = 'AdamW'
-    args.patience = 3
 
 args.find_unused_parameters = args.model in ['MTGNN']
 
@@ -306,12 +318,6 @@ if args.online_method:
 
     if flag == 'fsnet':
         flag = 'online'
-
-    if args.online_method == 'OneNet' and args.pretrain:
-        fsnet_name = "FSNet_RevIN"
-        args.fsnet_path = f'./checkpoints/{args.dataset}_60_{args.pred_len}_{fsnet_name}_' \
-                          f'online_ftM_sl60_ll48_pl{args.pred_len}_lr{settings.pretrain_lr_online_dict[fsnet_name][args.dataset]}' \
-                          f'_uniFalse_dm512_nh8_el2_dl1_df2048_fc3_ebtimeF_dtTrue_test_{ii}/checkpoint.pth'
 
     if 'proceed' in flag:
         if not args.freeze:
@@ -372,8 +378,14 @@ if __name__ == '__main__':
         setup_seed(fix_seed)
         print('Seed:', fix_seed)
 
+        if args.online_method == 'OneNet' and args.pretrain:
+            fsnet_name = "FSNet_RevIN"
+            args.fsnet_path = f'./checkpoints/{args.dataset}_60_{args.pred_len}_{fsnet_name}_' \
+                              f'online_ftM_sl60_ll48_pl{args.pred_len}_lr{settings.pretrain_lr_online_dict[fsnet_name][args.dataset]}' \
+                              f'_uniFalse_dm512_nh8_el2_dl1_df2048_fc3_ebtimeF_dtTrue_test_{ii}/checkpoint.pth'
+
         setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
-            args.model_id,
+            ((extra_model_id + "_") if extra_model_id else '') + args.model_id,
             flag,
             args.features,
             args.seq_len,
@@ -395,7 +407,7 @@ if __name__ == '__main__':
                 if args.online_method else settings.pretrain_lr_dict[args.model][args.dataset]
             if not args.border_type and args.model == 'iTransformer' and args.dataset == 'Weather':
                 pretrain_lr = 0.0001
-            pretrain_setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
+            pretrain_setting = '{}_{}_ft{}_sl{}_ll{}_pl{}_lr{}_uniFalse_dm{}_nh{}_el{}_dl{}_df{}_fc{}_eb{}_dt{}_{}_{}'.format(
                 args.model_id,
                 args.border_type if args.border_type else args.data,
                 args.features,
@@ -425,7 +437,8 @@ if __name__ == '__main__':
             args.borders = train_data.borders
             if args.border_type != 'online' and args.model == 'PatchTST':
                 settings.drop_last_PatchTST(args) # SOLID dropout the last when data split = 7:2:1
-        exp.wrap_data_kwargs['borders'] = args.borders
+        if exp.args.wrap_data_class:
+            exp.args.wrap_data_class[-1] = partial(exp.args.wrap_data_class[-1], borders=args.borders)
 
         path = os.path.join(args.checkpoints, setting, 'checkpoint.pth')
         if args.online_method not in ['Online', 'SOLID', 'ER', 'DERpp']:
@@ -447,7 +460,7 @@ if __name__ == '__main__':
 
         if args.do_valid and args.online_method and args.local_rank <= 0:
             assert isinstance(exp, Exp_Online)
-            mse, mae = exp.online(online_data=vali_data if isinstance(vali_data, Dataset_Recent) else None,
+            mse, mae = exp.online(online_data=vali_data if isinstance(vali_data, Dataset_Recent_Full_Feedback) else None,
                                   phase='val', show_progress=True)[:2]
             print('Best Valid MSE:', mse)
             all_results['mse'].append(mse)

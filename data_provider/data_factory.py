@@ -1,19 +1,8 @@
 
-from data_provider.data_loader import *
+from data_provider.dataloader_benchmark import *
+from data_provider.dataloader_online import *
 from torch.utils.data import DataLoader, DistributedSampler
 
-data_dict = {
-    'ETTh1': Dataset_ETT_hour,
-    'ETTh2': Dataset_ETT_hour,
-    'ETTm1': Dataset_ETT_minute,
-    'ETTm2': Dataset_ETT_minute,
-    'custom': Dataset_Custom,
-    'ETTh1_CI': Dataset_ETT_hour_CI,
-    'ETTh2_CI': Dataset_ETT_hour_CI,
-    'ETTm1_CI': Dataset_ETT_minute_CI,
-    'ETTm2_CI': Dataset_ETT_minute_CI,
-    'custom_CI': Dataset_Custom_CI,
-}
 
 flag2num = {'train': 0, 'val': 1, 'test': 2, 'pred': 3}
 
@@ -32,7 +21,7 @@ def get_dataset(args, flag, device='cpu', wrap_class=None, borders=None, take_po
         else:
             border = (borders[0][flag2num[flag]], borders[1][flag2num[flag]])
         if flag != 'train':
-            if Dataset_Recent in wrap_class or take_pre > 0:
+            if Dataset_Recent_Full_Feedback in wrap_class or take_pre > 0:
                 if take_pre > 1:
                     start = border[0] - take_pre
                 else:
@@ -40,16 +29,17 @@ def get_dataset(args, flag, device='cpu', wrap_class=None, borders=None, take_po
                 border = (max(0, start), border[1])
         if take_post > 0:
             border = (border[0], border[1] + take_post)
-    data_set = data_dict[args.data](
+    data_set = DatasetBenchmark(
         root_path=args.root_path,
         data_path=args.data_path,
         flag=flag,
-        size=[args.seq_len, args.label_len, args.pred_len],
+        seq_len=args.seq_len,
+        label_len=args.label_len,
+        pred_len=args.pred_len,
         features=args.features,
         target=args.target,
         timeenc=args.timeenc,
         freq=args.freq,
-        train_only=args.train_only,
         border=border,
         borders=args.borders if hasattr(args, 'borders') else None,
         ratio=args.ratio if hasattr(args, 'ratio') else None

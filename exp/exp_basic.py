@@ -17,8 +17,8 @@ class Exp_Basic(object):
         self.args = args
         self.label_position = 1
         self.device = self._acquire_device()
-        self.wrap_data_kwargs = {}
         self.model_optim = None
+        self.iter_count = 0
         model = self._build_model()
         if model is not None:
             self.model = model.to(self.device)
@@ -40,11 +40,11 @@ class Exp_Basic(object):
 
     def _get_data(self, flag, **kwargs):
         data_set, data_loader = data_provider(args=self.args, flag=flag, device=self.device,
-                                              wrap_class=self.args.wrap_data_class, **self.wrap_data_kwargs, **kwargs)
+                                              wrap_class=self.args.wrap_data_class, **kwargs)
         return data_set, data_loader
 
-    def _select_optimizer(self, filter_frozen=True, return_self=True, model=None):
-        if return_self and self.model_optim is not None:
+    def _select_optimizer(self, filter_frozen=True, reset=False, model=None):
+        if not reset and self.model_optim is not None:
             return self.model_optim
         else:
             # Need to instantiate a new one
@@ -54,7 +54,7 @@ class Exp_Basic(object):
             if not hasattr(self.args, 'optim'):
                 self.args.optim = 'Adam'
             model_optim = getattr(optim, self.args.optim)(params, lr=self.args.learning_rate)
-            if return_self:
+            if reset:
                 self.model_optim = model_optim
             return model_optim
 
@@ -87,22 +87,24 @@ class Exp_Basic(object):
         return loss
 
     def _update(self, batch, criterion, optimizer, scaler=None):
-        if not isinstance(optimizer, tuple):
-            optimizer = (optimizer, )
-        for optim in optimizer:
-            optim.zero_grad()
+        self.iter_count += 1
         outputs = self.forward(batch)
         loss = self.train_loss(criterion, batch, outputs)
-        if self.args.use_amp:
-            scaler.scale(loss).backward()
-            for optim in optimizer:
-                scaler.step(optim)
-            scaler.update()
-        else:
-            loss.backward()
+        if self.args.grad_accumulation > 1:
+            loss = loss / self.args.grad_accumulation
+        self._train_step(loss, optimizer, self.iter_count)
+        return loss, outputs
+
+    def _train_step(self, loss, optimizer, iter_count):
+        loss.backward()
+        if iter_count % self.args.grad_accumulation == 0:
+            if not isinstance(optimizer, tuple):
+                optimizer = (optimizer, )
+            if getattr(self.args, "clip_grad_norm", None):
+                torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.args.clip_grad_norm)
             for optim in optimizer:
                 optim.step()
-        return loss, outputs
+                optim.zero_grad()
 
     def state_dict(self, destination: typing.OrderedDict[str, torch.Tensor]=None,
                    prefix='', keep_vars=False, local_rank=-1) -> typing.OrderedDict[str, torch.Tensor]:
@@ -151,7 +153,7 @@ class Exp_Basic(object):
                             warnings.warn(f'{k} has different state dict from the checkpoint. '
                                           f'Trying to save all states of frozen parameters...')
                             assert k == 'model_optim'
-                            self.model_optim = self._select_optimizer(filter_frozen=False, return_self=False, model=model)
+                            self.model_optim = self._select_optimizer(filter_frozen=False, reset=True, model=model)
                             self.model_optim.load_state_dict(v)
                             self.remove_frozen_param_from_optim(self.model_optim)
                     else:

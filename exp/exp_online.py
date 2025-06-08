@@ -1,17 +1,18 @@
 import copy
+from functools import partial
 
 import numpy as np
 from tqdm import tqdm
 
 from data_provider.data_factory import data_provider, get_dataset, get_dataloader
-from data_provider.data_loader import Dataset_Recent
+from data_provider.dataloader_online import Dataset_Recent_Full_Feedback, Dataset_Recent_And_Replay
 from exp.exp_main import Exp_Main
 from models.OneNet import OneNet, Model_Ensemble
 from util.buffer import Buffer
 from util.metrics import metric, update_metrics, calculate_metrics
 import torch
 import torch.nn.functional as F
-from torch import optim, nn
+from torch import optim, nn, Tensor
 import torch.distributed as dist
 
 import os
@@ -25,21 +26,60 @@ warnings.filterwarnings('ignore')
 
 transformers = ['Autoformer', 'Transformer', 'Informer']
 
+class OnlineLoss:
+    def __init__(self, pred_len, criterion=nn.MSELoss(reduction='none')):
+        self.H = pred_len
+        self.criterion = criterion
+        self.mask = None
+
+    def get_mask(self, loss: Tensor):
+        if self.mask is None or self.mask.size() != loss.size():
+            replay_num = len(loss) - self.H
+            mask = torch.ones_like(loss)
+            mask[-self.H:] *= torch.tril(torch.ones(self.H, self.H, device=loss.device)).flip(0)
+            loss_weights = replay_num + self.H - torch.arange(self.H, device=loss.device, dtype=torch.float32)
+            loss_weights = 1 / loss_weights
+            self.mask = mask * loss_weights
+        return self.mask
+
+    def __call__(self, inputs: Tensor, target: Tensor, reweighter=None) -> Tensor:
+        sample_weight = None
+        if isinstance(inputs, (tuple, list)):
+            inputs, sample_weight = inputs
+        loss = self.criterion(inputs, target).mean(-1) # Last dimension is the variate dimension
+        mask = self.get_mask(loss)
+        if reweighter is not None:
+            sample_weight = reweighter(loss)
+        loss = loss * mask
+        if sample_weight is not None:
+            loss = loss * sample_weight
+        loss = loss.mean(1).sum()
+        return loss
+
+
 class Exp_Online(Exp_Main):
     def __init__(self, args):
         super().__init__(args)
         self.online_phases = ['test', 'online']
-        self.wrap_data_kwargs.update(recent_num=1, gap=self.args.pred_len)
+        self.args.wrap_data_class.append(
+            partial(Dataset_Recent_And_Replay, replay_num=self.args.replay_num, period=self.args.period, gap=args.pred_len) if
+            getattr(self.args, "replay_num") else
+            partial(Dataset_Recent_Full_Feedback, gap=self.args.pred_len)
+        )
+        if getattr(self.args, "replay_num"):
+            self.online_loss = OnlineLoss(self.args.pred_len)
+        else:
+            self.online_loss = nn.MSELoss()
 
     def _get_data(self, flag, **kwargs):
         if flag in self.online_phases:
             if self.args.leakage:
-                data_set = get_dataset(self.args, flag, self.device, wrap_class=self.args.wrap_data_class, **kwargs)
+                data_set = get_dataset(self.args, flag, self.device, wrap_class=self.args.wrap_data_class[:-1], **kwargs)
                 data_loader = get_dataloader(data_set, self.args, 'online' if flag == 'test' else 'test')
             else:
                 data_set = get_dataset(self.args, flag, self.device,
-                                       wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                       **self.wrap_data_kwargs, **kwargs)
+                                     wrap_class=self.args.wrap_data_class,
+                                     **kwargs)
                 data_loader = get_dataloader(data_set, self.args, 'online')
             return data_set, data_loader
         else:
@@ -64,24 +104,25 @@ class Exp_Online(Exp_Main):
         return mse
 
     def update_valid(self, valid_data=None):
+        self.args.grad_accumulation = 1
         self.phase = 'online'
 
         if hasattr(self.args, 'leakage') and self.args.leakage:
             if self.args.model == 'PatchTST':
                 valid_data = get_dataset(self.args, 'val', self.device,
-                                         wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                         take_post=self.args.pred_len - 1, **self.wrap_data_kwargs)
+                                         wrap_class=self.args.wrap_data_class,
+                                         take_post=self.args.pred_len - 1)
                 self.online_information_leakage_PatchTST(valid_data, None, 'online', True)
             else:
                 valid_data = get_dataset(self.args, 'val', self.device, wrap_class=self.args.wrap_data_class,
-                                         take_pre=True, take_post=self.args.pred_len - 1, **self.wrap_data_kwargs)
+                                         take_pre=True, take_post=self.args.pred_len - 1)
                 self.online_information_leakage(valid_data, None, 'online', True)
             return []
 
-        if valid_data is None or not isinstance(valid_data, Dataset_Recent):
+        if valid_data is None or not isinstance(valid_data, Dataset_Recent_Full_Feedback):
             valid_data = get_dataset(self.args, 'val', self.device,
-                                     wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                     take_post=self.args.pred_len - 1, **self.wrap_data_kwargs)
+                                     wrap_class=self.args.wrap_data_class,
+                                     take_post=self.args.pred_len - 1)
         valid_loader = get_dataloader(valid_data, self.args, 'online')
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -100,35 +141,11 @@ class Exp_Online(Exp_Main):
                 self.model.train()
         return predictions
 
-    def _update_online(self, batch, criterion, optimizer, scaler=None):
-        if batch[0].dim() == 3:
-            return self._update(batch, criterion, optimizer, scaler)
-        else:
-            batch = [b[0] for b in batch]
-            if not isinstance(optimizer, tuple):
-                optimizer = (optimizer,)
-            for optim in optimizer:
-                optim.zero_grad()
-            outputs = self.forward(batch)
-            batch_y = batch[1]
-            if not self.args.pin_gpu:
-                batch_y = batch_y.to(self.device)
-            if isinstance(outputs, (tuple, list)):
-                outputs = outputs[0]
-            loss = 0
-            H = batch_y.shape[1]
-            for i in range(H):
-                loss += criterion(outputs[i, :H-i], batch_y[i, :H-i])
-            if self.args.use_amp:
-                scaler.scale(loss).backward()
-                for optim in optimizer:
-                    scaler.step(optim)
-                scaler.update()
-            else:
-                loss.backward()
-                for optim in optimizer:
-                    optim.step()
-            return loss, outputs
+    def _select_criterion(self):
+        return self.online_loss
+
+    def _update_online(self, batch, criterion, optimizer, scaler=None, current_data=None):
+        return self._update(batch, criterion, optimizer, scaler)
 
     def online(self, online_data=None, target_variate=None, phase='test', show_progress=False):
         self.phase = phase
@@ -139,8 +156,7 @@ class Exp_Online(Exp_Main):
                 return self.online_information_leakage(online_data, target_variate, phase, show_progress)
         if online_data is None:
             online_data = get_dataset(self.args, phase, self.device,
-                                      wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                      **self.wrap_data_kwargs)
+                                      wrap_class=self.args.wrap_data_class)
         # online_loader_initial = get_dataloader(online_data.dataset, self.args, flag='online')
         online_loader = get_dataloader(online_data, self.args, flag='online')
 
@@ -169,7 +185,7 @@ class Exp_Online(Exp_Main):
             online_loader = tqdm(online_loader, mininterval=10)
         for i, (recent_data, current_data) in enumerate(online_loader):
             self.model.train()
-            loss, _ = self._update_online(recent_data, criterion, model_optim, scaler)
+            loss, _ = self._update_online(recent_data, criterion, model_optim, scaler, current_data)
             # assert not torch.isnan(loss)
             self.model.eval()
             with torch.no_grad():
@@ -201,8 +217,7 @@ class Exp_Online(Exp_Main):
 
     def online_information_leakage(self, online_data=None, target_variate=None, phase='test', show_progress=False):
         if online_data is None:
-            online_data = get_dataset(self.args, phase, self.device, wrap_class=self.args.wrap_data_class,
-                                      **self.wrap_data_kwargs)
+            online_data = get_dataset(self.args, phase, self.device, wrap_class=self.args.wrap_data_class)
         online_loader = get_dataloader(online_data, self.args, flag='online')
 
         if self.args.do_predict:
@@ -238,8 +253,7 @@ class Exp_Online(Exp_Main):
 
         self.phase = phase
         if online_data is None:
-            online_data = get_dataset(self.args, phase, self.device, wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                      **self.wrap_data_kwargs)
+            online_data = get_dataset(self.args, phase, self.device, wrap_class=self.args.wrap_data_class)
         # online_loader_initial = get_dataloader(online_data.dataset, self.args, flag='online')
         online_loader = get_dataloader(online_data, self.args, flag='online')
 
@@ -278,8 +292,7 @@ class Exp_Online(Exp_Main):
             return mse, mae, online_data
 
     def analysis_online(self):
-        online_data = get_dataset(self.args, 'test', self.device, wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                  **self.wrap_data_kwargs)
+        online_data = get_dataset(self.args, 'test', self.device, wrap_class=self.args.wrap_data_class)
         online_loader = get_dataloader(online_data, self.args, flag='online')
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -339,7 +352,7 @@ class Exp_ER(Exp_Online):
         return loss
 
     def _update_online(self, batch, criterion, optimizer, scaler=None):
-        loss, outputs = self._update(batch, criterion, optimizer, scaler=None)
+        loss, outputs = self._update(batch, criterion, optimizer, scaler)
         idx = self.count + torch.arange(batch[1].size(0)).to(self.device)
         self.count += batch[1].size(0)
         self.buffer.add_data(*(batch + (idx,)))
@@ -409,10 +422,10 @@ class Exp_OneNet(Exp_FSNet):
         self.opt_bias = optim.Adam(self.model.decision.parameters(), lr=self.args.learning_rate_bias)
         self.bias = torch.zeros(self.args.enc_in, device=self.model.weight.device)
 
-    def _select_optimizer(self, filter_frozen=True, return_self=True, model=None):
+    def _select_optimizer(self, filter_frozen=True, reset=True, model=None):
         if model is None or isinstance(model, OneNet):
-            return super()._select_optimizer(filter_frozen, return_self, model=self.model.backbone)
-        return super()._select_optimizer(filter_frozen, return_self, model=model)
+            return super()._select_optimizer(filter_frozen, reset, model=self.model.backbone)
+        return super()._select_optimizer(filter_frozen, reset, model=model)
 
     def state_dict(self, *args, **kwargs):
         destination = super().state_dict(*args, **kwargs)
@@ -511,4 +524,3 @@ class Exp_OneNet(Exp_FSNet):
         self.opt_w.step()
         self.opt_w.zero_grad()
         return loss / 2, outputs
-

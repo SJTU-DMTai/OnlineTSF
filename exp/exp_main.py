@@ -1,6 +1,8 @@
 import importlib
+from functools import partial
 
 from torch.utils.data import DataLoader
+from tqdm import tqdm
 
 import models.normalization
 import settings
@@ -54,7 +56,7 @@ class Exp_Main(Exp_Basic):
 
         if hasattr(self.args, 'load_path'):
             if not self.args.freeze:
-                self.model_optim = self._select_optimizer(model=model.to(self.device))  # Otherwise, no need to reload its optimizer
+                self._select_optimizer(model=model.to(self.device))  # Otherwise, no need to reload its optimizer
             print('Load checkpoints from', self.args.load_path)
             model = self.load_checkpoint(self.args.load_path, model)
             if self.model_optim is not None:
@@ -94,6 +96,7 @@ class Exp_Main(Exp_Basic):
 
     def _process_batch(self, batch):
         batch = super()._process_batch(batch)
+        batch = [data.squeeze_(0) if data.ndim > 3 else data for data in batch]
         batch_x, batch_y = batch[:2]
         if self.args.model in settings.need_x_y_mark:
             batch_x, batch_y, batch_x_mark, batch_y_mark = batch[:4]
@@ -138,6 +141,13 @@ class Exp_Main(Exp_Basic):
         if vali_data is None and not self.args.train_only:
             vali_data, vali_loader = self._get_data(flag='val')
 
+        batch_size = self.args.batch_size * int(os.getenv('WORLD_SIZE', 1))
+        if self.args.macro_batch_size > batch_size:
+            self.args.grad_accumulation = min(self.args.macro_batch_size // batch_size, len(train_loader))
+            if self.args.num_batch_per_epoch > 1:
+                self.args.grad_accumulation = min(self.args.grad_accumulation, self.args.num_batch_per_epoch)
+        print("Gradient Accumulation: {}".format(self.args.grad_accumulation))
+
         if self.args.checkpoints:
             path = os.path.join(self.args.checkpoints, setting)
         else:
@@ -162,8 +172,8 @@ class Exp_Main(Exp_Basic):
         else:
             scheduler = None
 
+        self.iter_count = 0
         for epoch in range(self.args.train_epochs):
-            iter_count = 0
             train_loss = []
 
             if self.args.local_rank != -1:
@@ -173,9 +183,8 @@ class Exp_Main(Exp_Basic):
 
             self.model.train()
             epoch_time = time.time()
-            for i, batch in enumerate(train_loader):
+            for i, batch in enumerate(tqdm(train_loader, mininterval=10)):
                 self.phase = 'train'
-                iter_count += 1
                 loss, _ = self._update(batch, criterion, model_optim, scaler)
                 train_loss.append(loss.item())
                 if self.args.lradj == 'TST':
@@ -251,9 +260,9 @@ class Exp_Main(Exp_Basic):
         preds = []
         self.model.eval()
         self.args.borders[1][0] = self.args.borders[-1][1]
-        self.wrap_data_kwargs['borders'] = self.args.borders
+        self.args.wrap_data_class = partial(self.args.wrap_data_class, borders=self.args.borders)
         data_set = get_dataset(self.args, 'train', self.device,
-                               wrap_class=self.args.wrap_data_class, **self.wrap_data_kwargs)
+                               wrap_class=self.args.wrap_data_class)
         dataloader = DataLoader(
             data_set,
             batch_size=self.args.batch_size,
@@ -272,8 +281,7 @@ class Exp_Main(Exp_Basic):
         return
 
     def analysis(self):
-        data = get_dataset(self.args, 'test', self.device, wrap_class=self.args.wrap_data_class,
-                                  **self.wrap_data_kwargs)
+        data = get_dataset(self.args, 'test', self.device, wrap_class=self.args.wrap_data_class)
         times_infer = []
         print('GPU Mem:', torch.cuda.max_memory_allocated())
         self.model.eval()

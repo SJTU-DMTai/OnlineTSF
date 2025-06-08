@@ -5,7 +5,7 @@ from tqdm import tqdm
 
 from adapter import proceed
 from data_provider.data_factory import get_dataset, get_dataloader
-from data_provider.data_loader import Dataset_Recent
+from data_provider.dataloader_online import Dataset_Recent_Full_Feedback
 from exp import Exp_Online
 
 
@@ -32,11 +32,12 @@ class Exp_Proceed(Exp_Online):
         return ret
 
     def update_valid(self, valid_data=None, valid_dataloader=None):
+        self.args.grad_accumulation = 1
         self.phase = 'online'
         if valid_data is None:
             valid_data = get_dataset(self.args, 'val', self.device,
-                                     wrap_class=self.args.wrap_data_class + [Dataset_Recent],
-                                     **self.wrap_data_kwargs, take_post=self.args.pred_len - 1)
+                                     wrap_class=self.args.wrap_data_class,
+                                     take_post=self.args.pred_len - 1)
         valid_loader = get_dataloader(valid_data, self.args, 'online')
         model_optim = self._select_optimizer()
         criterion = self._select_criterion()
@@ -89,7 +90,7 @@ class Exp_Proceed(Exp_Online):
         self._model.flag_update = False
         return loss, outputs
 
-    def _update_online(self, batch, criterion, optimizer, scaler=None, flag_current=False):
+    def _update_online(self, batch, criterion, optimizer, scaler=None, current_data=None, flag_current=False):
         self._model.flag_online_learning = True
         self._model.flag_current = flag_current
         loss, outputs = super()._update_online(batch, criterion, optimizer, scaler)
